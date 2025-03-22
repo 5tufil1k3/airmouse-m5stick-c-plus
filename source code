@@ -1,0 +1,158 @@
+#include <M5StickCPlus.h>
+#include <BleMouse.h>
+
+// ----------------------------
+// Adjustable Parameters
+// ----------------------------
+#define CALIBRATION_SAMPLES 200
+float alpha = 0.1f;         // Smoothing factor (0 = heavy smoothing, 1 = no smoothing)
+float deadZone = 0.15f;     // Dead zone threshold
+float sensitivity = 3.0f;   // Multiplier for cursor movement
+
+// ----------------------------
+// Global Variables
+// ----------------------------
+BleMouse bleMouse("M5 Air Mouse", "M5Stack");
+
+// Gyro offset calibration values
+float gOffsetX = 0.0f, gOffsetY = 0.0f, gOffsetZ = 0.0f;
+
+// Smoothed gyro readings (X and Z only)
+static float smoothedGyroX = 0.0f, smoothedGyroZ = 0.0f;
+
+// -----------------------------------------------------
+// Gyro Calibration Function
+// -----------------------------------------------------
+void calibrateGyro() {
+  Serial.println("Hold the device perfectly still for calibration...");
+  delay(2000);  // Time for user to hold still
+  
+  float gx, gy, gz;
+  gOffsetX = 0;
+  gOffsetY = 0;
+  gOffsetZ = 0;
+  
+  for (int i = 0; i < CALIBRATION_SAMPLES; i++) {
+    M5.Imu.getGyroData(&gx, &gy, &gz);
+    gOffsetX += gx;
+    gOffsetY += gy;
+    gOffsetZ += gz;
+    delay(20);
+  }
+  
+  gOffsetX /= CALIBRATION_SAMPLES;
+  gOffsetY /= CALIBRATION_SAMPLES;
+  gOffsetZ /= CALIBRATION_SAMPLES;
+  
+  Serial.print("Calibration complete. Offsets: X=");
+  Serial.print(gOffsetX, 4);
+  Serial.print(" Y=");
+  Serial.print(gOffsetY, 4);
+  Serial.print(" Z=");
+  Serial.println(gOffsetZ, 4);
+}
+
+// -----------------------------------------------------
+// Setup
+// -----------------------------------------------------
+void setup() {
+  Serial.begin(115200);
+  M5.begin();
+  int imuStatus = M5.Imu.Init();
+  Serial.print("IMU init status: ");
+  Serial.println(imuStatus);  // 0 indicates success
+
+  // Prepare display
+  M5.Lcd.setRotation(4);
+  M5.Lcd.fillScreen(BLACK);
+  M5.Lcd.setTextColor(WHITE);
+  M5.Lcd.setTextSize(2);
+  M5.Lcd.setCursor(0, 0);
+  M5.Lcd.println("Calibrating...");
+  
+  // Calibrate gyro
+  calibrateGyro();
+
+  // Start BLE Mouse
+  bleMouse.begin();
+  Serial.println("BLE Mouse started.");
+
+  // Wait for BLE connection (up to 15 seconds)
+  M5.Lcd.fillScreen(BLACK);
+  M5.Lcd.setCursor(0, 0);
+  M5.Lcd.println("Waiting for BT...");
+  unsigned long startAttemptTime = millis();
+  while (!bleMouse.isConnected() && (millis() - startAttemptTime < 15000)) {
+    delay(100);
+  }
+  
+  if (bleMouse.isConnected()){
+    M5.Lcd.fillScreen(BLACK);
+    M5.Lcd.setCursor(0, 0);
+    M5.Lcd.println("BT Connected!");
+    Serial.println("BLE Mouse connected.");
+  } else {
+    M5.Lcd.fillScreen(BLACK);
+    M5.Lcd.setCursor(0, 0);
+    M5.Lcd.println("BT Failed!");
+    Serial.println("BLE connection failed.");
+  }
+  
+  delay(1000);
+}
+
+// -----------------------------------------------------
+// Main Loop
+// -----------------------------------------------------
+void loop() {
+  M5.update();  // Update button states
+
+  // Check BLE connection status
+  if (!bleMouse.isConnected()) {
+    Serial.println("BLE disconnected. Attempting to reconnect...");
+    M5.Lcd.fillScreen(BLACK);
+    M5.Lcd.setCursor(0, 0);
+    M5.Lcd.println("BT Disconnected\nReconnecting...");
+    bleMouse.begin();  // Attempt to reinitialize BLE
+    delay(1000);
+    return; // Skip processing until reconnected
+  }
+  
+  // Read raw gyro data
+  float rawGX, rawGY, rawGZ;
+  M5.Imu.getGyroData(&rawGX, &rawGY, &rawGZ);
+  
+  // Subtract calibration offsets
+  rawGX -= gOffsetX;
+  rawGZ -= gOffsetZ;
+
+  // Apply smoothing (low-pass filter)
+  smoothedGyroX = alpha * rawGX + (1.0f - alpha) * smoothedGyroX;
+  smoothedGyroZ = alpha * rawGZ + (1.0f - alpha) * smoothedGyroZ;
+
+  // Apply dead zone filtering
+  float finalGX = (fabs(smoothedGyroX) < deadZone) ? 0.0f : smoothedGyroX;
+  float finalGZ = (fabs(smoothedGyroZ) < deadZone) ? 0.0f : smoothedGyroZ;
+
+  // Map gyro data to cursor movement
+  int8_t deltaX = (int8_t)(-finalGZ * sensitivity);
+  int8_t deltaY = (int8_t)(-finalGX * sensitivity);
+
+  // Move the mouse cursor
+  bleMouse.move(deltaX, deltaY);
+
+  // Handle button presses for clicks
+  if (M5.BtnA.isPressed()) {
+    bleMouse.press(MOUSE_LEFT);
+  } else {
+    bleMouse.release(MOUSE_LEFT);
+  }
+  
+  if (M5.BtnB.isPressed()) {
+    bleMouse.press(MOUSE_RIGHT);
+  } else {
+    bleMouse.release(MOUSE_RIGHT);
+  }
+
+  delay(20); // Small delay to pace the loop
+}
